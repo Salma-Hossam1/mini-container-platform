@@ -1,0 +1,16 @@
+/src/output.txt
+/src/mcrun
+
+# Build
+mcrun
+*.o
+
+# Runtime generated overlayfs data
+rootfs/containers/
+
+# Shell history
+rootfs/alpine/root/.ash_history
+
+# Logs
+*.log
+output.txt

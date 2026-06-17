@@ -7,7 +7,18 @@ This document demonstrates every feature implemented in the runtime and how to v
 # Build
 
 ```bash
-gcc container.c rootfs.c main.c cgroup.c cli.c network.c bridge.c nat.c userns.c -o mcrun
+gcc \
+container.c \
+rootfs.c \
+overlay.c \
+main.c \
+cgroup.c \
+cli.c \
+network.c \
+bridge.c \
+nat.c \
+userns.c \
+-o mcrun
 ```
 
 ---
@@ -43,7 +54,7 @@ Expected:
 1
 ```
 
-or
+or:
 
 ```bash
 ps
@@ -64,7 +75,7 @@ ps -ef | grep sh
 
 Expected:
 
-Process has a different PID on host.
+Process has a different PID on the host.
 
 This proves PID isolation.
 
@@ -84,9 +95,61 @@ Only Alpine rootfs files appear.
 
 Host directories should not appear.
 
+This proves filesystem isolation through chroot() and mount namespaces.
+
 ---
 
-# Test 3 - User Namespace
+# Test 3 - OverlayFS
+
+Inside container:
+
+```bash
+touch hello.txt
+
+echo "overlay works" > hello.txt
+
+cat hello.txt
+```
+
+Expected:
+
+```text
+overlay works
+```
+
+Host:
+
+```bash
+ls rootfs/containers/web/upper
+```
+
+Expected:
+
+```text
+hello.txt
+```
+
+Verify the file does NOT exist in the base Alpine image:
+
+```bash
+ls rootfs/alpine/hello.txt
+```
+
+Expected:
+
+```text
+No such file or directory
+```
+
+This proves:
+
+* Writes go to the Upper Layer.
+* Base image remains unchanged.
+* Copy-on-write behavior works correctly.
+
+---
+
+# Test 4 - User Namespace
 
 Inside container:
 
@@ -101,13 +164,15 @@ uid=0(root)
 gid=0(root)
 ```
 
+(or similar depending on group mappings)
+
 Find host PID:
 
 ```bash
 ps -ef | grep sh
 ```
 
-Then:
+Host:
 
 ```bash
 ps -o pid,uid,gid,cmd -p <host_pid>
@@ -126,7 +191,49 @@ Container root != Host root
 
 ---
 
-# Test 4 - Network Namespace
+# Test 5 - User Mapping
+
+Inside container:
+
+```bash
+id
+```
+
+Expected:
+
+```text
+uid=0(root)
+```
+
+Host:
+
+```bash
+ps -ef | grep sh
+```
+
+Find the shell process PID.
+
+Then:
+
+```bash
+ps -o pid,uid,gid,cmd -p <pid>
+```
+
+Expected:
+
+```text
+UID=1000
+```
+
+Same process.
+
+Different identities.
+
+This demonstrates Linux User Namespace mapping.
+
+---
+
+# Test 6 - Network Namespace
 
 Inside container:
 
@@ -158,7 +265,7 @@ Container interfaces are isolated from host interfaces.
 
 ---
 
-# Test 5 - Container IP
+# Test 7 - Container IP
 
 Inside container:
 
@@ -174,7 +281,7 @@ Expected:
 
 ---
 
-# Test 6 - Default Gateway
+# Test 8 - Default Gateway
 
 Inside container:
 
@@ -193,7 +300,7 @@ Bridge acts as gateway.
 
 ---
 
-# Test 7 - Bridge
+# Test 9 - Linux Bridge
 
 Host:
 
@@ -207,11 +314,11 @@ Expected:
 web-host master mini0
 ```
 
-This proves the host side veth is attached to the bridge.
+This proves the host-side veth is attached to the bridge.
 
 ---
 
-# Test 8 - Multiple Containers
+# Test 10 - Multiple Containers
 
 Terminal 1:
 
@@ -245,11 +352,11 @@ Expected:
 
 Successful replies.
 
-This proves bridge switching works.
+This proves Layer-2 communication through the bridge.
 
 ---
 
-# Test 9 - NAT
+# Test 11 - Internet Access
 
 Inside container:
 
@@ -261,6 +368,17 @@ Expected:
 
 Successful replies.
 
+This proves:
+
+* veth pair works
+* bridge works
+* routing works
+* NAT works
+
+---
+
+# Test 12 - NAT
+
 Host:
 
 ```bash
@@ -269,13 +387,17 @@ sudo iptables -t nat -L POSTROUTING -n -v
 
 Expected:
 
-MASQUERADE rule exists.
+A MASQUERADE rule exists for:
 
-This proves outbound internet access through NAT.
+```text
+10.0.0.0/24
+```
+
+This proves outbound internet traffic is translated through the host interface.
 
 ---
 
-# Test 10 - Port Mapping
+# Test 13 - Port Mapping
 
 Start container:
 
@@ -290,28 +412,39 @@ sudo ./mcrun \
 Inside container:
 
 ```bash
-nc -l -p 80
+busybox httpd -f -p 80
 ```
 
 Host:
 
 ```bash
-echo hello | nc <HOST_IP> 8080
+curl http://<HOST_IP>:8080
 ```
 
 Expected:
 
-Inside container:
-
-```text
-hello
-```
+HTML output or a directory listing.
 
 This proves DNAT port forwarding works.
 
+Equivalent concept:
+
+```bash
+docker run -p 8080:80
+```
+
 ---
 
-# Test 11 - Cgroups CPU
+# Test 14 - CPU Cgroup
+
+Run container:
+
+```bash
+sudo ./mcrun \
+  --name web \
+  --ip 10.0.0.2 \
+  --cpu 50
+```
 
 Host:
 
@@ -321,11 +454,22 @@ cat /sys/fs/cgroup/web/cpu.max
 
 Expected:
 
-Configured CPU quota.
+A configured CPU quota.
+
+This proves CPU resource limits are applied.
 
 ---
 
-# Test 12 - Cgroups Memory
+# Test 15 - Memory Cgroup
+
+Run container:
+
+```bash
+sudo ./mcrun \
+  --name web \
+  --ip 10.0.0.2 \
+  --memory 256
+```
 
 Host:
 
@@ -335,7 +479,13 @@ cat /sys/fs/cgroup/web/memory.max
 
 Expected:
 
-Configured memory limit.
+```text
+268435456
+```
+
+(or equivalent value)
+
+This proves memory limits are applied.
 
 ---
 
@@ -347,15 +497,20 @@ Delete bridge:
 sudo ip link delete mini0
 ```
 
-Remove NAT rule:
+Flush NAT rules:
 
 ```bash
 sudo iptables -t nat -F
 ```
 
-Remove cgroup:
+Remove OverlayFS directories (optional):
 
-Automatically removed when container exits.
+```bash
+sudo rm -rf rootfs/containers/web
+sudo rm -rf rootfs/containers/db
+```
+
+Cgroups are automatically removed when containers exit.
 
 ---
 
@@ -366,11 +521,32 @@ Automatically removed when container exits.
 * Mount Namespace
 * User Namespace
 * Network Namespace
+* chroot()
+* Alpine RootFS
+* OverlayFS (Copy-on-Write Filesystem)
 * veth pairs
 * Linux Bridge
-* NAT
+* NAT (MASQUERADE)
 * DNAT Port Mapping
-* CPU Cgroups
-* Memory Cgroups
-* chroot RootFS Isolation
-* Alpine RootFS
+* CPU Cgroups v2
+* Memory Cgroups v2
+
+---
+
+# Expected Learning Outcomes
+
+After completing all tests, you will have verified:
+
+* Process isolation
+* Filesystem isolation
+* Copy-on-write filesystems
+* User identity mapping
+* Network isolation
+* Virtual Ethernet devices
+* Linux bridge switching
+* Internet connectivity through NAT
+* Host-to-container port forwarding
+* CPU resource control
+* Memory resource control
+
+These are the same Linux kernel primitives used by modern container runtimes such as Docker, containerd, and CRI-O.

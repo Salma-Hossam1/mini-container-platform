@@ -7,6 +7,7 @@
 #include "bridge.h"
 #include "nat.h"
 #include "userns.h"
+#include "overlay.h"
 
 #include <errno.h>
 #include <sched.h>
@@ -62,7 +63,25 @@ printf(
 
 ///////////////////////////////////////////////////
 
-    if (setup_rootfs(config->rootfs) != 0)
+    if (mount_overlay(config->name) != 0)
+     {
+    printf("overlay mount failed\n");
+     }
+    else
+    {
+        printf("overlay mount ok\n");
+    }
+
+    char merged[256];
+
+    get_merged_path(
+    config->name,
+    merged,
+    sizeof(merged)
+    );
+
+
+    if (setup_rootfs(merged) != 0)
     {
         return 1;
     }
@@ -82,12 +101,17 @@ int start_container(ContainerConfig *config)
         return -1;
     }
 
+    create_overlay_dirs(config->name);
+    // add write per to user 1000 in host -> 0 in container
+    fix_overlay_permissions(config->name);
+
     if (pipe(config->sync_pipe) != 0)
-{
+    {
     perror("pipe");
     return -1;
-}
+    }
     
+
     pid_t pid = clone(
         child_fn,
         child_stack + STACK_SIZE,
@@ -225,6 +249,7 @@ close(config->sync_pipe[1]);
 
     waitpid(pid, NULL, 0);
 
+    unmount_overlay(config->name);
 
     // cleanup port mapping if exists
     if (

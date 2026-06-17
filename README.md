@@ -4,7 +4,35 @@ A lightweight container runtime built from scratch in C using Linux kernel primi
 
 The goal of this project is educational:
 
-Instead of using Docker as a black box, rebuild the core technologies behind containers and understand how Linux provides process isolation, filesystem isolation, networking, resource control, and user mapping.
+Instead of treating Docker as a black box, this project rebuilds the core technologies behind containers directly on top of the Linux kernel and demonstrates how process isolation, filesystem isolation, networking, resource control, and user mapping actually work.
+
+---
+
+# Motivation
+
+Most developers interact with containers through:
+
+```bash
+docker run
+```
+
+without seeing what happens underneath.
+
+This project explores the layers hidden behind that command by implementing a minimal container runtime from scratch using:
+
+* Linux Namespaces
+* Linux Cgroups
+* OverlayFS
+* Virtual Ethernet Devices (veth)
+* Linux Bridges
+* NAT
+* Port Forwarding
+
+No Docker Engine.
+
+No container libraries.
+
+Just Linux.
 
 ---
 
@@ -12,31 +40,34 @@ Instead of using Docker as a black box, rebuild the core technologies behind con
 
 When running:
 
+```bash
 sudo ./mcrun --name web --ip 10.0.0.2
+```
 
 the runtime performs the following steps:
 
 1. Create CPU and Memory cgroups.
-2. Create a new process using clone().
-3. Create isolated namespaces:
+2. Create OverlayFS container layers.
+3. Create a new process using `clone()`.
+4. Create isolated namespaces:
 
    * PID Namespace
    * Mount Namespace
    * Network Namespace
    * User Namespace
-4. Create a veth pair.
-5. Move one end into the container network namespace.
-6. Attach the host side to a Linux bridge.
-7. Configure container networking.
-8. Configure default gateway.
-9. Enable internet access through NAT.
-10. Apply resource limits.
-11. Switch to the container root filesystem.
-12. Start /bin/sh inside the container.
+5. Create a veth pair.
+6. Move one end into the container network namespace.
+7. Attach the host side to a Linux bridge.
+8. Configure container networking.
+9. Configure a default gateway.
+10. Enable internet access through NAT.
+11. Mount the container filesystem using OverlayFS.
+12. Switch into the container root filesystem.
+13. Start `/bin/sh`.
 
 Result:
 
-A process that behaves like a separate machine while sharing the host kernel.
+A process that behaves like an independent machine while sharing the host kernel.
 
 ---
 
@@ -46,17 +77,77 @@ A process that behaves like a separate machine while sharing the host kernel.
 
 Implemented using:
 
-* chroot()
-* custom Alpine root filesystem
+* `chroot()`
+* Mount Namespace
 
-Container sees:
+Container sees its own filesystem hierarchy:
 
+```text
 /bin
 /etc
 /usr
+/root
 ...
+```
 
 instead of the host filesystem.
+
+---
+
+## Overlay Filesystem (OverlayFS)
+
+Implemented using Linux OverlayFS.
+
+Each container receives four layers:
+
+```text
+Lower Layer (Read Only)
+        |
+        v
+    Alpine RootFS
+        |
+        |
+        +------------------+
+                           |
+                           v
+                 Overlay Filesystem
+                           |
+            +--------------+--------------+
+            |                             |
+            v                             v
+      Upper Layer                    Work Layer
+   (Container Writes)           (Kernel Internal)
+```
+
+### Lower Layer
+
+Shared Alpine root filesystem.
+
+Read-only.
+
+Used by all containers.
+
+### Upper Layer
+
+Stores container modifications.
+
+Examples:
+
+* New files
+* Edited files
+* Deleted files
+
+### Work Layer
+
+Internal directory required by the Linux OverlayFS implementation.
+
+### Merged Layer
+
+The filesystem visible inside the container.
+
+Changes made by one container do not affect other containers.
+
+This provides copy-on-write behavior similar to Docker's OverlayFS storage driver.
 
 ---
 
@@ -64,19 +155,25 @@ instead of the host filesystem.
 
 Implemented using:
 
+```c
 CLONE_NEWPID
+```
 
 Processes inside the container have their own PID tree.
 
 Example:
 
-Inside container:
+Container:
 
+```text
 PID = 1
+```
 
 Host:
 
+```text
 PID = 2191565
+```
 
 Both represent the same process.
 
@@ -86,9 +183,15 @@ Both represent the same process.
 
 Implemented using:
 
+```c
 CLONE_NEWNS
+```
 
 Mount operations performed inside the container do not affect the host.
+
+Each container has an isolated mount table.
+
+This namespace is what allows each container to mount its own OverlayFS view without affecting other containers.
 
 ---
 
@@ -96,29 +199,41 @@ Mount operations performed inside the container do not affect the host.
 
 Implemented using:
 
+```c
 CLONE_NEWUSER
+```
 
 UID Mapping:
 
 Container:
 
-root (uid=0)
+```text
+uid=0 (root)
+```
 
 Host:
 
+```text
 uid=1000
+```
 
-This allows the container to appear as root internally without granting root privileges on the host.
+This allows a process to appear as root inside the container while remaining an unprivileged user on the host.
 
 Example:
 
 Container:
 
+```text
 uid=0(root)
+```
 
 Host:
 
+```text
 uid=1000(salma)
+```
+
+Both represent the same process.
 
 ---
 
@@ -126,13 +241,17 @@ uid=1000(salma)
 
 Implemented using:
 
+```text
 cgroups v2
+```
 
 Example:
 
+```bash
 --cpu 50
+```
 
-Limits the container to approximately 50% CPU.
+Limits the container to approximately 50% CPU usage.
 
 ---
 
@@ -140,19 +259,23 @@ Limits the container to approximately 50% CPU.
 
 Implemented using:
 
+```text
 cgroups v2
+```
 
 Example:
 
+```bash
 --memory 256
+```
 
-Limits the container to 256 MB.
+Limits the container to 256 MB of RAM.
 
 ---
 
 # Networking
 
-Networking was implemented entirely using Linux networking primitives.
+Networking is implemented entirely using Linux networking primitives.
 
 ---
 
@@ -162,15 +285,19 @@ Each container receives:
 
 Host side:
 
+```text
 web-host
+```
 
 Container side:
 
+```text
 web-cont
+```
 
-Think of a veth pair as a virtual Ethernet cable.
+A veth pair behaves like a virtual Ethernet cable.
 
-Anything sent on one side appears on the other.
+Anything sent through one side appears on the other.
 
 ---
 
@@ -178,45 +305,50 @@ Anything sent on one side appears on the other.
 
 A bridge named:
 
+```text
 mini0
+```
 
-acts like a Layer-2 switch.
+acts as a Layer-2 switch.
 
-All container interfaces are connected to it.
+All container interfaces are attached to it.
 
 Example:
 
+```text
+          mini0
+        /       \
+       /         \
+  web-host     db-host
+      |            |
+  web-cont     db-cont
 ```
-        mini0
-      /       \
-     /         \
-```
-
-web-host         db-host
-|                |
-web-cont         db-cont
 
 Containers can communicate directly through the bridge.
 
 ---
 
-## Container Communication
+## Container-to-Container Communication
 
 Example:
 
 Container A:
 
+```text
 10.0.0.2
+```
 
 Container B:
 
+```text
 10.0.0.3
+```
 
-A can ping B directly.
+Both communicate directly through the bridge.
 
 No NAT is involved.
 
-Traffic stays inside the bridge.
+Traffic remains inside the virtual network.
 
 ---
 
@@ -224,11 +356,15 @@ Traffic stays inside the bridge.
 
 Bridge IP:
 
+```text
 10.0.0.1
+```
 
 Container route:
 
+```text
 default via 10.0.0.1
+```
 
 The bridge acts as the first hop for outgoing traffic.
 
@@ -238,33 +374,39 @@ The bridge acts as the first hop for outgoing traffic.
 
 Implemented using:
 
+```text
 iptables MASQUERADE
+```
 
 Example:
 
 Container:
 
+```text
 10.0.0.2
+```
 
-Host WiFi:
+Host:
 
-192.168.1.6
+```text
+192.168.1.x
+```
 
-When container sends traffic:
+When traffic leaves the host:
 
-Source:
-
+```text
 10.0.0.2
+```
 
 becomes:
 
-192.168.1.6
+```text
+192.168.1.x
+```
 
-before leaving the host.
+Replies are translated back automatically.
 
-Reply packets are translated back automatically.
-
-This allows containers to access the internet.
+This enables internet connectivity for containers.
 
 ---
 
@@ -272,150 +414,187 @@ This allows containers to access the internet.
 
 Implemented using:
 
+```text
 iptables DNAT
+```
 
 Example:
 
 Host:
 
-192.168.1.6:8080
+```text
+192.168.1.x:8080
+```
 
 Container:
 
+```text
 10.0.0.2:80
+```
 
-Incoming packets:
+Incoming packets are rewritten before routing:
 
-192.168.1.6:8080
-
-are rewritten to:
-
+```text
+192.168.1.x:8080
+            |
+            v
 10.0.0.2:80
+```
 
-before routing.
+Conceptually similar to:
 
-This is conceptually similar to:
-
+```bash
 docker run -p 8080:80
+```
 
 ---
 
 # Architecture
 
-```
-                      Internet
-                           |
-                           |
-                      NAT Router
-                           |
-                 Host IP: 192.168.1.6
-                           |
-                           |
-                   +----------------+
-                   |     mini0      |
-                   | Linux Bridge   |
-                   +----------------+
-                      /          \
-                     /            \
-                    /              \
-              web-host         db-host
-                  |                |
-              web-cont         db-cont
-              10.0.0.2        10.0.0.3
+```text
+                         Internet
+                              |
+                              |
+                         NAT Router
+                              |
+                    Host IP: 192.168.1.x
+                              |
+                              |
+                     +----------------+
+                     |     mini0      |
+                     | Linux Bridge   |
+                     +----------------+
+                        /          \
+                       /            \
+                      /              \
+                web-host         db-host
+                    |                |
+                web-cont         db-cont
+                10.0.0.2        10.0.0.3
 ```
 
 ---
 
 # Build
 
-gcc container.c rootfs.c main.c cgroup.c cli.c network.c bridge.c nat.c userns.c -o mcrun
+```bash
+gcc \
+container.c \
+rootfs.c \
+overlay.c \
+cgroup.c \
+network.c \
+bridge.c \
+nat.c \
+userns.c \
+cli.c \
+main.c \
+-o mcrun
+```
+
+---
+
+# Download Alpine RootFS
+
+This repository does not include the Alpine root filesystem.
+
+Download it separately:
+
+```bash
+mkdir -p rootfs/alpine
+
+wget https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-*.tar.gz
+
+tar -xzf alpine-minirootfs-*.tar.gz -C rootfs/alpine
+```
 
 ---
 
 # Run
 
-sudo ./mcrun 
---name web 
+```bash
+sudo ./mcrun \
+--name web \
 --ip 10.0.0.2
+```
 
 ---
 
-# Run With Limits
+# Run With Resource Limits
 
-sudo ./mcrun 
---name web 
---ip 10.0.0.2 
---cpu 50 
+```bash
+sudo ./mcrun \
+--name web \
+--ip 10.0.0.2 \
+--cpu 50 \
 --memory 256
+```
 
 ---
 
 # Run With Port Mapping
 
-sudo ./mcrun 
---name web 
---ip 10.0.0.2 
---host-port 8080 
+```bash
+sudo ./mcrun \
+--name web \
+--ip 10.0.0.2 \
+--host-port 8080 \
 --container-port 80
+```
 
 ---
 
 # Project Structure
 
+```text
 container.c
-
-Container lifecycle and clone().
+    Container lifecycle and clone()
 
 rootfs.c
+    Filesystem isolation and chroot
 
-Filesystem isolation.
+overlay.c
+    OverlayFS management
 
 cgroup.c
-
-CPU and memory limits.
+    CPU and memory limits
 
 network.c
-
-veth creation and namespace networking.
+    veth creation and namespace networking
 
 bridge.c
-
-Linux bridge management.
+    Linux bridge management
 
 nat.c
-
-NAT and port forwarding.
+    NAT and port forwarding
 
 userns.c
-
-User namespace configuration.
+    User namespace configuration
 
 cli.c
-
-Argument parsing.
+    Argument parsing
 
 main.c
-
-Program entry point.
+    Program entry point
+```
 
 ---
 
-# What Is Missing?
+# Future Improvements
 
-This runtime intentionally focuses on core container technologies.
-
-Potential future improvements:
+Potential future enhancements:
 
 * Volumes
-* Image management
-* Private registry
-* Overlay filesystems
+* Image Management
+* Private Registry
+* Container Metadata Store
 * Capabilities
 * Seccomp
-* OCI compatibility
-* Container metadata store
-* Container lifecycle API
-* Container orchestration
+* OCI Compatibility
+* Container Lifecycle API
+* Container Snapshots
+* Container Scheduler
+* Kubernetes-style Orchestration
 
 ---
 
@@ -423,4 +602,4 @@ Potential future improvements:
 
 The objective is not to replace Docker.
 
-The objective is to understand how Docker-like runtimes are built using Linux kernel primitives and to expose the layers that are normally hidden behind a single command.
+The objective is to understand how modern container runtimes are built using Linux kernel primitives and expose the layers that are normally hidden behind a single command.
