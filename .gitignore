@@ -3,10 +3,10 @@
 
 
 # Runtime generated overlayfs data
-rootfs/containers/
+rootfs/
 
-# Shell history
-rootfs/alpine/root/.ash_history
+# # Shell history
+# rootfs/alpine/root/.ash_history
 
 # # Logs
 # *.log
